@@ -19,8 +19,11 @@ void StructuredLightScanner::setup(int projectorWidth, int projectorHeight) {
     gui.setName("Structured Light Scan");
     gui.setup();
     gui.add(bitsSlider.setup("Gray Code Bits", 9, 6, 12));
+    gui.add(captureIntervalSlider.setup("Interval (ms)", 500, 100, 2000));
+    gui.add(minBrightnessSlider.setup("Min Brightness", 10, 0, 255));
+    gui.add(maxBrightnessSlider.setup("Max Brightness", 245, 0, 255));
     gui.add(btnStart.setup("Start Scan"));
-    gui.add(btnCapture.setup("Capture Frame (Space)"));
+    gui.add(btnCapture.setup("Capture Frame (Space) [Debug]"));
     gui.add(btnReset.setup("Reset"));
 
     btnStart.addListener(this, &StructuredLightScanner::startScan);
@@ -29,7 +32,18 @@ void StructuredLightScanner::setup(int projectorWidth, int projectorHeight) {
 }
 
 void StructuredLightScanner::update(ofPixels& cameraPixels) {
-    if (scanning && currentPattern < totalPatterns) {
+    if (blanking && (ofGetElapsedTimef() - blankStartTime < BLANK_DURATION)) {
+        // Brief blank between patterns to let projector finish physical transition
+        patternFbo.begin();
+        ofClear(128, 128, 128, 255);
+        patternFbo.end();
+        return;
+    }
+    if (blanking) {
+        blanking = false; // blank period expired
+    }
+
+    if (scanning && !isPaused && currentPattern < totalPatterns) {
         patternFbo.begin();
         ofClear(0, 0, 0, 0);
         ofSetColor(255);
@@ -50,8 +64,16 @@ void StructuredLightScanner::drawGui(int x, int y) {
     gui.setPosition(x, y);
     gui.draw();
     ofDrawBitmapStringHighlight("Pattern: " + ofToString(currentPattern) + " / " + ofToString(totalPatterns), x, y + gui.getHeight() + 20);
-    ofDrawBitmapStringHighlight("Status: " + std::string(scanComplete ? "COMPLETE" : (scanning ? "SCANNING" : "IDLE")), x, y + gui.getHeight() + 40);
-    ofDrawBitmapStringHighlight("Mesh vertices: " + ofToString(mesh.getNumVertices()), x, y + gui.getHeight() + 60);
+    if (isPaused) {
+        ofDrawBitmapStringHighlight("Status: PAUSED — frame validation failed", x, y + gui.getHeight() + 40, ofColor(255, 0, 0), ofColor(255));
+    } else {
+        ofDrawBitmapStringHighlight("Status: " + std::string(scanComplete ? "COMPLETE" : (scanning ? "SCANNING" : "IDLE")), x, y + gui.getHeight() + 40);
+    }
+    if (scanning && !isPaused) {
+        float cd = getCountdown();
+        ofDrawBitmapStringHighlight("Capture in: " + ofToString(cd, 2) + " s", x, y + gui.getHeight() + 60);
+    }
+    ofDrawBitmapStringHighlight("Mesh vertices: " + ofToString(mesh.getNumVertices()), x, y + gui.getHeight() + 80);
 }
 
 void StructuredLightScanner::drawPreview(int x, int y, int w, int h) {
@@ -61,16 +83,21 @@ void StructuredLightScanner::drawPreview(int x, int y, int w, int h) {
 
 void StructuredLightScanner::startScan() {
     grayCodeBits = bitsSlider;
+    captureInterval = captureIntervalSlider / 1000.0f; // ms → s
     generatePatterns();
     scanning = true;
     scanComplete = false;
+    isPaused = false;
     currentPattern = 0;
+    currentRetry = 0;
+    blanking = false;
     capturedFrames.clear();
     capturedFrames.resize(totalPatterns);
     decodedCamX.release();
     decodedCamY.release();
     confidence.release();
-    ofLogNotice("StructuredLightScanner") << "Scan started, " << totalPatterns << " patterns";
+    lastCaptureTime = ofGetElapsedTimef();
+    ofLogNotice("StructuredLightScanner") << "Scan started, " << totalPatterns << " patterns, interval=" << captureInterval << "s";
 }
 
 void StructuredLightScanner::captureFrame() {
@@ -79,7 +106,7 @@ void StructuredLightScanner::captureFrame() {
 }
 
 void StructuredLightScanner::storeFrame(const cv::Mat& cameraFrame) {
-    if (!scanning || currentPattern >= totalPatterns) return;
+    if (!scanning || isPaused || currentPattern >= totalPatterns) return;
 
     cv::Mat gray;
     if (cameraFrame.channels() == 3) {
@@ -90,9 +117,31 @@ void StructuredLightScanner::storeFrame(const cv::Mat& cameraFrame) {
         gray = cameraFrame.clone();
     }
 
+    if (!validateFrame(gray)) {
+        if (currentRetry == 0) {
+            currentRetry = 1;
+            // Retry once after 1.5× the normal interval
+            lastCaptureTime = ofGetElapsedTimef() - captureInterval + captureInterval * 1.5f;
+            ofLogWarning("StructuredLightScanner") << "Frame validation failed for pattern " << currentPattern << ", retrying once...";
+            return;
+        } else {
+            isPaused = true;
+            ofLogError("StructuredLightScanner") << "Frame validation failed again for pattern " << currentPattern << ". Sequence paused.";
+            return;
+        }
+    }
+
+    // Valid frame: store it
+    currentRetry = 0;
     capturedFrames[currentPattern] = gray;
     ofLogNotice("StructuredLightScanner") << "Stored frame " << currentPattern << " " << gray.cols << "x" << gray.rows;
+
+    // Enter blanking period before advancing
+    blanking = true;
+    blankStartTime = ofGetElapsedTimef();
+
     currentPattern++;
+    markCaptured(); // reset timer for next frame
 
     if (currentPattern >= totalPatterns) {
         scanning = false;
@@ -102,10 +151,22 @@ void StructuredLightScanner::storeFrame(const cv::Mat& cameraFrame) {
     }
 }
 
+bool StructuredLightScanner::validateFrame(const cv::Mat& gray) {
+    if (gray.empty() || gray.total() == 0) return false;
+
+    double mean = cv::mean(gray)[0];
+    float minB = (float)minBrightnessSlider;
+    float maxB = (float)maxBrightnessSlider;
+    return (mean >= minB && mean <= maxB);
+}
+
 void StructuredLightScanner::reset() {
     scanning = false;
     scanComplete = false;
+    isPaused = false;
     currentPattern = 0;
+    currentRetry = 0;
+    blanking = false;
     capturedFrames.clear();
     patterns.clear();
     hasMesh_ = false;
@@ -113,6 +174,40 @@ void StructuredLightScanner::reset() {
     decodedCamX.release();
     decodedCamY.release();
     confidence.release();
+}
+
+void StructuredLightScanner::abortScan() {
+    scanning = false;
+    isPaused = false;
+    currentPattern = 0;
+    currentRetry = 0;
+    blanking = false;
+    capturedFrames.clear();
+    ofLogNotice("StructuredLightScanner") << "Scan aborted";
+}
+
+void StructuredLightScanner::resumeScan() {
+    if (!isPaused) return;
+    isPaused = false;
+    currentRetry = 0;
+    lastCaptureTime = ofGetElapsedTimef();
+    ofLogNotice("StructuredLightScanner") << "Scan resumed at pattern " << currentPattern;
+}
+
+bool StructuredLightScanner::shouldCapture() const {
+    if (!scanning || isPaused || blanking || currentPattern >= totalPatterns) return false;
+    float elapsed = ofGetElapsedTimef() - lastCaptureTime;
+    return elapsed >= captureInterval;
+}
+
+void StructuredLightScanner::markCaptured() {
+    lastCaptureTime = ofGetElapsedTimef();
+}
+
+float StructuredLightScanner::getCountdown() const {
+    if (!scanning || currentPattern >= totalPatterns) return 0.0f;
+    float remaining = captureInterval - (ofGetElapsedTimef() - lastCaptureTime);
+    return remaining > 0.0f ? remaining : 0.0f;
 }
 
 void StructuredLightScanner::generatePatterns() {

@@ -19,6 +19,9 @@ void ProjectorCalibrator::setup(int projectorWidth, int projectorHeight) {
     gui.setName("Projector Calibration");
     gui.setup();
     gui.add(bitsSlider.setup("Gray Code Bits", 9, 6, 12));
+    gui.add(captureIntervalSlider.setup("Interval (ms)", 500, 100, 2000));
+    gui.add(minBrightnessSlider.setup("Min Brightness", 10, 0, 255));
+    gui.add(maxBrightnessSlider.setup("Max Brightness", 245, 0, 255));
     gui.add(btnStart.setup("Start New Pose"));
     gui.add(btnAddPose.setup("Finish Pose (Enter)"));
     gui.add(btnCalibrate.setup("Calibrate"));
@@ -31,6 +34,16 @@ void ProjectorCalibrator::setup(int projectorWidth, int projectorHeight) {
 }
 
 void ProjectorCalibrator::update(ofPixels& cameraPixels) {
+    if (blanking && (ofGetElapsedTimef() - blankStartTime < BLANK_DURATION)) {
+        patternFbo.begin();
+        ofClear(128, 128, 128, 255);
+        patternFbo.end();
+        return;
+    }
+    if (blanking) {
+        blanking = false;
+    }
+
     if (currentPatternIndex >= 0 && currentPatternIndex < (int)projectedPatterns.size()) {
         patternFbo.begin();
         ofClear(0, 0, 0, 0);
@@ -56,7 +69,13 @@ void ProjectorCalibrator::drawGui(int x, int y) {
     gui.draw();
     ofDrawBitmapStringHighlight("Poses: " + ofToString(getPoseCount()), x, y + gui.getHeight() + 20);
     ofDrawBitmapStringHighlight("Current frames: " + ofToString(getCapturedFrameCount()) + " / " + ofToString(projectedPatterns.size()), x, y + gui.getHeight() + 40);
-    ofDrawBitmapStringHighlight("Status: " + std::string(calibrated ? "CALIBRATED" : "NOT CALIBRATED"), x, y + gui.getHeight() + 60);
+    if (isPaused) {
+        ofDrawBitmapStringHighlight("Status: PAUSED — frame validation failed", x, y + gui.getHeight() + 60, ofColor(255, 0, 0), ofColor(255));
+    } else if (currentPatternIndex >= 0) {
+        float cd = getCountdown();
+        ofDrawBitmapStringHighlight("Capture in: " + ofToString(cd, 2) + " s", x, y + gui.getHeight() + 60);
+    }
+    ofDrawBitmapStringHighlight("Status: " + std::string(calibrated ? "CALIBRATED" : "NOT CALIBRATED"), x, y + gui.getHeight() + 80);
 }
 
 void ProjectorCalibrator::drawPreview(int x, int y, int w, int h) {
@@ -65,14 +84,19 @@ void ProjectorCalibrator::drawPreview(int x, int y, int w, int h) {
 }
 
 void ProjectorCalibrator::startSequence() {
+    captureInterval = captureIntervalSlider / 1000.0f; // ms → s
     currentPatternIndex = 0;
+    currentRetry = 0;
+    isPaused = false;
+    blanking = false;
     capturedFrames.clear();
     capturedFrames.resize(projectedPatterns.size());
-    ofLogNotice("ProjectorCalibrator") << "Started new pose sequence (" << projectedPatterns.size() << " patterns)";
+    lastCaptureTime = ofGetElapsedTimef();
+    ofLogNotice("ProjectorCalibrator") << "Started new pose sequence (" << projectedPatterns.size() << " patterns, interval=" << captureInterval << "s)";
 }
 
 void ProjectorCalibrator::storeCameraFrame(const cv::Mat& cameraFrame) {
-    if (currentPatternIndex < 0 || currentPatternIndex >= (int)projectedPatterns.size()) return;
+    if (currentPatternIndex < 0 || currentPatternIndex >= (int)projectedPatterns.size() || isPaused) return;
 
     cv::Mat gray;
     if (cameraFrame.channels() == 3) {
@@ -83,9 +107,38 @@ void ProjectorCalibrator::storeCameraFrame(const cv::Mat& cameraFrame) {
         gray = cameraFrame.clone();
     }
 
+    if (!validateFrame(gray)) {
+        if (currentRetry == 0) {
+            currentRetry = 1;
+            lastCaptureTime = ofGetElapsedTimef() - captureInterval + captureInterval * 1.5f;
+            ofLogWarning("ProjectorCalibrator") << "Frame validation failed for pattern " << currentPatternIndex << ", retrying once...";
+            return;
+        } else {
+            isPaused = true;
+            ofLogError("ProjectorCalibrator") << "Frame validation failed again for pattern " << currentPatternIndex << ". Sequence paused.";
+            return;
+        }
+    }
+
+    currentRetry = 0;
     capturedFrames[currentPatternIndex] = gray;
     ofLogNotice("ProjectorCalibrator") << "Stored frame " << currentPatternIndex;
+
+    // Enter blanking period before advancing
+    blanking = true;
+    blankStartTime = ofGetElapsedTimef();
+
     currentPatternIndex++;
+    markCaptured(); // reset timer for next frame
+}
+
+bool ProjectorCalibrator::validateFrame(const cv::Mat& gray) {
+    if (gray.empty() || gray.total() == 0) return false;
+
+    double mean = cv::mean(gray)[0];
+    float minB = (float)minBrightnessSlider;
+    float maxB = (float)maxBrightnessSlider;
+    return (mean >= minB && mean <= maxB);
 }
 
 void ProjectorCalibrator::finishPose() {
@@ -108,8 +161,44 @@ void ProjectorCalibrator::clearPoses() {
     poses.clear();
     capturedFrames.clear();
     currentPatternIndex = -1;
+    isPaused = false;
+    currentRetry = 0;
+    blanking = false;
     calibrated = false;
     ofLogNotice("ProjectorCalibrator") << "Cleared all poses";
+}
+
+void ProjectorCalibrator::abortSequence() {
+    currentPatternIndex = -1;
+    isPaused = false;
+    currentRetry = 0;
+    blanking = false;
+    capturedFrames.clear();
+    ofLogNotice("ProjectorCalibrator") << "Sequence aborted";
+}
+
+void ProjectorCalibrator::resumeSequence() {
+    if (!isPaused) return;
+    isPaused = false;
+    currentRetry = 0;
+    lastCaptureTime = ofGetElapsedTimef();
+    ofLogNotice("ProjectorCalibrator") << "Sequence resumed at pattern " << currentPatternIndex;
+}
+
+bool ProjectorCalibrator::shouldCapture() const {
+    if (currentPatternIndex < 0 || currentPatternIndex >= (int)projectedPatterns.size() || isPaused || blanking) return false;
+    float elapsed = ofGetElapsedTimef() - lastCaptureTime;
+    return elapsed >= captureInterval;
+}
+
+void ProjectorCalibrator::markCaptured() {
+    lastCaptureTime = ofGetElapsedTimef();
+}
+
+float ProjectorCalibrator::getCountdown() const {
+    if (currentPatternIndex < 0 || currentPatternIndex >= (int)projectedPatterns.size() || isPaused || blanking) return 0.0f;
+    float remaining = captureInterval - (ofGetElapsedTimef() - lastCaptureTime);
+    return remaining > 0.0f ? remaining : 0.0f;
 }
 
 bool ProjectorCalibrator::calibrate(CalibrationData& cameraData) {

@@ -72,10 +72,26 @@ void ofApp::update() {
     meshViewer.update();
     mappingEditor.update(ofGetElapsedTimef());
 
-    // Advance scanning automatically if in scan mode
+    // Auto-capture: feed camera frames to active sequences at timed intervals
     if (state == STATE_SCAN && scanner.isScanning()) {
-        // In a real app you'd trigger capture externally or with a timer
-        // scanner.captureFrame(); // requires camera frame synchronized
+        if (grabber.isFrameNew() && scanner.shouldCapture()) {
+            cv::Mat cam = ofToCv(grabber.getPixels());
+            cv::Mat gray;
+            if (cam.channels() == 3) cv::cvtColor(cam, gray, cv::COLOR_RGB2GRAY);
+            else if (cam.channels() == 4) cv::cvtColor(cam, gray, cv::COLOR_RGBA2GRAY);
+            else gray = cam.clone();
+            scanner.storeFrame(gray);
+        }
+    }
+    if (state == STATE_PROJECTOR_CALIB && projectorCalib.isCapturing()) {
+        if (grabber.isFrameNew() && projectorCalib.shouldCapture()) {
+            cv::Mat cam = ofToCv(grabber.getPixels());
+            cv::Mat gray;
+            if (cam.channels() == 3) cv::cvtColor(cam, gray, cv::COLOR_RGB2GRAY);
+            else if (cam.channels() == 4) cv::cvtColor(cam, gray, cv::COLOR_RGBA2GRAY);
+            else gray = cam.clone();
+            projectorCalib.storeCameraFrame(gray);
+        }
     }
 
     // Update projector camera from calibration
@@ -197,30 +213,14 @@ void ofApp::keyPressed(int key) {
         if (key == 's') cameraCalib.save(calibPath, calibrationData);
         break;
     case STATE_PROJECTOR_CALIB:
-        if (key == ' ') {
-            if (grabber.isFrameNew()) {
-                cv::Mat cam = ofToCv(grabber.getPixels());
-                cv::Mat gray;
-                if (cam.channels() == 3) cv::cvtColor(cam, gray, cv::COLOR_RGB2GRAY);
-                else if (cam.channels() == 4) cv::cvtColor(cam, gray, cv::COLOR_RGBA2GRAY);
-                else gray = cam.clone();
-                projectorCalib.storeCameraFrame(gray);
-            }
-        }
         if (key == 'c') projectorCalib.calibrate(calibrationData);
         if (key == 's') projectorCalib.save(calibPath, calibrationData);
+        if (key == OF_KEY_ESC) projectorCalib.abortSequence();
+        if (key == ' ' && projectorCalib.isSequencePaused()) projectorCalib.resumeSequence();
         break;
     case STATE_SCAN:
-        if (key == ' ') {
-            if (grabber.isFrameNew()) {
-                cv::Mat cam = ofToCv(grabber.getPixels());
-                cv::Mat gray;
-                if (cam.channels() == 3) cv::cvtColor(cam, gray, cv::COLOR_RGB2GRAY);
-                else if (cam.channels() == 4) cv::cvtColor(cam, gray, cv::COLOR_RGBA2GRAY);
-                else gray = cam.clone();
-                scanner.storeFrame(gray);
-            }
-        }
+        if (key == OF_KEY_ESC) scanner.abortScan();
+        if (key == ' ' && scanner.isScanPaused()) scanner.resumeScan();
         break;
     case STATE_MAP:
         mappingEditor.keyPressed(key);

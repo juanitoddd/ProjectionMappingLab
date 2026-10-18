@@ -24,6 +24,15 @@ public:
     void storeCameraFrame(const cv::Mat& cameraFrame); // called by ofApp per frame
     void finishPose();                        // commit current captured sequence as a pose
     void clearPoses();
+    void abortSequence();
+    void resumeSequence();
+    bool isSequencePaused() const { return isPaused; }
+
+    // Auto-capture timing
+    bool isCapturing() const { return currentPatternIndex >= 0; }
+    bool shouldCapture() const;
+    void markCaptured();
+    float getCountdown() const;
 
     bool calibrate(CalibrationData& cameraData);
     void onCalibrate();                       // ofxButton wrapper
@@ -36,10 +45,17 @@ public:
 private:
     int projW, projH;
     bool calibrated = false;
+    bool isPaused = false;
 
     int grayCodeBits = 9;
     int currentPatternIndex = -1; // -1 = idle
+    int currentRetry = 0;
     std::vector<cv::Mat> projectedPatterns;
+
+    // Blanking between patterns
+    bool blanking = false;
+    float blankStartTime = 0.0f;
+    static constexpr float BLANK_DURATION = 0.016f;
 
     // Current sequence being captured
     std::vector<cv::Mat> capturedFrames;
@@ -53,11 +69,18 @@ private:
     ofFbo patternFbo;
     ofxPanel gui;
     ofxIntSlider bitsSlider;
+    ofxFloatSlider captureIntervalSlider;
+    ofxIntSlider minBrightnessSlider;
+    ofxIntSlider maxBrightnessSlider;
     ofxButton btnStart, btnAddPose, btnCalibrate, btnClear;
+
+    float lastCaptureTime = 0.0f;
+    float captureInterval = 0.5f;
 
     void generatePatterns();
     cv::Mat grayCodePattern(int axis, int bit, bool inverse);
     void decodeCurrentSequence(CalibPose& pose);
     bool extractCheckerboardFromWhiteFrame(const cv::Mat& whiteFrame,
                                            std::vector<cv::Point2f>& corners);
+    bool validateFrame(const cv::Mat& gray);
 };

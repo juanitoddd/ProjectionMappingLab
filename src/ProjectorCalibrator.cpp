@@ -1,7 +1,6 @@
 #include "ProjectorCalibrator.h"
 #include "OcvHelpers.h"
 
-// Gray code → binary conversion
 static int grayToBinary(int gray) {
     int binary = gray;
     binary ^= (binary >> 1);
@@ -14,22 +13,21 @@ static int grayToBinary(int gray) {
 void ProjectorCalibrator::setup(int projectorWidth, int projectorHeight) {
     projW = projectorWidth;
     projH = projectorHeight;
-
     patternFbo.allocate(projW, projH, GL_RGB);
     generatePatterns();
 
     gui.setName("Projector Calibration");
     gui.setup();
     gui.add(bitsSlider.setup("Gray Code Bits", 9, 6, 12));
-    gui.add(btnStart.setup("Start Pattern Sequence"));
-    gui.add(btnCapture.setup("Capture Frame (Space)"));
+    gui.add(btnStart.setup("Start New Pose"));
+    gui.add(btnAddPose.setup("Finish Pose (Enter)"));
     gui.add(btnCalibrate.setup("Calibrate"));
     gui.add(btnClear.setup("Clear All"));
 
-    btnStart.addListener(this, &ProjectorCalibrator::capturePattern);
-    btnCapture.addListener(this, &ProjectorCalibrator::capturePattern);
+    btnStart.addListener(this, &ProjectorCalibrator::startSequence);
+    btnAddPose.addListener(this, &ProjectorCalibrator::finishPose);
     btnCalibrate.addListener(this, &ProjectorCalibrator::onCalibrate);
-    btnClear.addListener(this, &ProjectorCalibrator::clearFrames);
+    btnClear.addListener(this, &ProjectorCalibrator::clearPoses);
 }
 
 void ProjectorCalibrator::update(ofPixels& cameraPixels) {
@@ -39,12 +37,16 @@ void ProjectorCalibrator::update(ofPixels& cameraPixels) {
         ofSetColor(255);
         drawCvMat(projectedPatterns[currentPatternIndex], 0, 0);
         patternFbo.end();
-        ofLogNotice("ProjectorCalibrator") << "Displaying pattern " << currentPatternIndex;
+        ofLogNotice("ProjectorCalibrator") << "Pattern " << currentPatternIndex;
     } else {
         patternFbo.begin();
         ofClear(128, 128, 128, 255);
         ofSetColor(255);
-        ofDrawBitmapString("Projector Calib: Press Start", 20, 40);
+        if (poses.empty()) {
+            ofDrawBitmapString("Projector Calib: Press 'Start New Pose'", 20, 40);
+        } else {
+            ofDrawBitmapString("Poses captured: " + ofToString((int)poses.size()) + "  Press Start for next", 20, 40);
+        }
         patternFbo.end();
     }
 }
@@ -52,11 +54,9 @@ void ProjectorCalibrator::update(ofPixels& cameraPixels) {
 void ProjectorCalibrator::drawGui(int x, int y) {
     gui.setPosition(x, y);
     gui.draw();
-    ofDrawBitmapStringHighlight("Captured: " + ofToString(getCaptureCount()) + " / " + ofToString(projectedPatterns.size()), x, y + gui.getHeight() + 20);
-    ofDrawBitmapStringHighlight("Status: " + std::string(calibrated ? "CALIBRATED" : "NOT CALIBRATED"), x, y + gui.getHeight() + 40);
-    if (currentPatternIndex >= 0) {
-        ofDrawBitmapStringHighlight("Pattern: " + ofToString(currentPatternIndex), x, y + gui.getHeight() + 60);
-    }
+    ofDrawBitmapStringHighlight("Poses: " + ofToString(getPoseCount()), x, y + gui.getHeight() + 20);
+    ofDrawBitmapStringHighlight("Current frames: " + ofToString(getCapturedFrameCount()) + " / " + ofToString(projectedPatterns.size()), x, y + gui.getHeight() + 40);
+    ofDrawBitmapStringHighlight("Status: " + std::string(calibrated ? "CALIBRATED" : "NOT CALIBRATED"), x, y + gui.getHeight() + 60);
 }
 
 void ProjectorCalibrator::drawPreview(int x, int y, int w, int h) {
@@ -64,14 +64,11 @@ void ProjectorCalibrator::drawPreview(int x, int y, int w, int h) {
     drawCvMat(capturedFrames.back(), x, y, w, h);
 }
 
-void ProjectorCalibrator::capturePattern() {
-    // GUI callback – starts/restarts the sequence.
+void ProjectorCalibrator::startSequence() {
     currentPatternIndex = 0;
     capturedFrames.clear();
     capturedFrames.resize(projectedPatterns.size());
-    decodedCameraCoords.release();
-    decodedCameraCoordsY.release();
-    ofLogNotice("ProjectorCalibrator") << "Started pattern sequence (" << projectedPatterns.size() << " patterns)";
+    ofLogNotice("ProjectorCalibrator") << "Started new pose sequence (" << projectedPatterns.size() << " patterns)";
 }
 
 void ProjectorCalibrator::storeCameraFrame(const cv::Mat& cameraFrame) {
@@ -91,41 +88,156 @@ void ProjectorCalibrator::storeCameraFrame(const cv::Mat& cameraFrame) {
     currentPatternIndex++;
 }
 
-bool ProjectorCalibrator::calibrate(const CalibrationData& cameraData) {
-    if (capturedFrames.empty() || capturedFrames[0].empty()) {
-        ofLogError("ProjectorCalibrator") << "No captured frames";
-        return false;
-    }
-    if (!cameraData.isCameraCalibrated) {
-        ofLogError("ProjectorCalibrator") << "Camera not calibrated";
-        return false;
+void ProjectorCalibrator::finishPose() {
+    if (currentPatternIndex < (int)projectedPatterns.size()) {
+        ofLogWarning("ProjectorCalibrator") << "Sequence incomplete, cannot finish pose";
+        return;
     }
 
-    decodeCorrespondences();
+    CalibPose pose;
+    pose.frames = capturedFrames;
+    decodeCurrentSequence(pose);
+    poses.push_back(pose);
 
-    // We need a planar checkerboard in the scene to establish 3D↔2D correspondences
-    // for the projector. This is a placeholder that sets the calibration to true
-    // once correspondences are decoded. The actual solvePnP / calibrateCamera call
-    // should be performed by ofApp after detecting checkerboard corners in the
-    // decoded correspondence map.
-    calibrated = true;
-    ofLogNotice("ProjectorCalibrator") << "Correspondences decoded. Ready for extrinsics solve (placeholder).";
-    return true;
+    currentPatternIndex = -1;
+    capturedFrames.clear();
+    ofLogNotice("ProjectorCalibrator") << "Pose finished. Total poses: " << poses.size();
 }
 
-void ProjectorCalibrator::clearFrames() {
+void ProjectorCalibrator::clearPoses() {
+    poses.clear();
     capturedFrames.clear();
     currentPatternIndex = -1;
     calibrated = false;
-    decodedCameraCoords.release();
-    decodedCameraCoordsY.release();
-    ofLogNotice("ProjectorCalibrator") << "Cleared";
+    ofLogNotice("ProjectorCalibrator") << "Cleared all poses";
+}
+
+bool ProjectorCalibrator::calibrate(CalibrationData& cameraData) {
+    if (poses.size() < 3) {
+        ofLogError("ProjectorCalibrator") << "Need at least 3 poses for stereo calibration";
+        return false;
+    }
+    if (!cameraData.isCameraCalibrated) {
+        ofLogError("ProjectorCalibrator") << "Camera must be calibrated first";
+        return false;
+    }
+
+    std::vector<std::vector<cv::Point3f>> objectPoints;
+    std::vector<std::vector<cv::Point2f>> cameraImagePoints;
+    std::vector<std::vector<cv::Point2f>> projectorImagePoints;
+
+    for (size_t i = 0; i < poses.size(); ++i) {
+        const CalibPose& pose = poses[i];
+
+        // Detect checkerboard in the white frame (last pattern is white)
+        const cv::Mat& whiteFrame = pose.frames.back();
+        std::vector<cv::Point2f> camCorners;
+        if (!extractCheckerboardFromWhiteFrame(whiteFrame, camCorners)) {
+            ofLogWarning("ProjectorCalibrator") << "Pose " << i << ": checkerboard not found";
+            continue;
+        }
+
+        // Build object points (same for each pose)
+        std::vector<cv::Point3f> objPts;
+        for (int h = 0; h < boardSize.height; ++h) {
+            for (int w = 0; w < boardSize.width; ++w) {
+                objPts.emplace_back(w * squareSize, h * squareSize, 0.0f);
+            }
+        }
+        objectPoints.push_back(objPts);
+        cameraImagePoints.push_back(camCorners);
+
+        // Map each camera corner to projector pixel via decoded correspondences
+        std::vector<cv::Point2f> projCorners;
+        for (const auto& c : camCorners) {
+            int cx = (int)round(c.x);
+            int cy = (int)round(c.y);
+            if (cx < 0 || cx >= pose.decodedProjX.cols || cy < 0 || cy >= pose.decodedProjX.rows) {
+                projCorners.emplace_back(-1, -1);
+                continue;
+            }
+            float px = pose.decodedProjX.at<float>(cy, cx);
+            float py = pose.decodedProjY.at<float>(cy, cx);
+            float conf = pose.confidence.at<float>(cy, cx);
+            if (px < 0 || py < 0 || conf < 0.5f) {
+                projCorners.emplace_back(-1, -1);
+            } else {
+                projCorners.emplace_back(px, py);
+            }
+        }
+        projectorImagePoints.push_back(projCorners);
+    }
+
+    if (objectPoints.size() < 2) {
+        ofLogError("ProjectorCalibrator") << "Not enough valid poses with checkerboard detection";
+        return false;
+    }
+
+    // Filter out invalid projector correspondences per pose
+    for (size_t i = 0; i < objectPoints.size(); ++i) {
+        std::vector<cv::Point3f> validObj;
+        std::vector<cv::Point2f> validCam;
+        std::vector<cv::Point2f> validProj;
+        for (size_t j = 0; j < projectorImagePoints[i].size(); ++j) {
+            if (projectorImagePoints[i][j].x >= 0) {
+                validObj.push_back(objectPoints[i][j]);
+                validCam.push_back(cameraImagePoints[i][j]);
+                validProj.push_back(projectorImagePoints[i][j]);
+            }
+        }
+        objectPoints[i] = validObj;
+        cameraImagePoints[i] = validCam;
+        projectorImagePoints[i] = validProj;
+    }
+
+    // Intrinsic initial guesses
+    cv::Mat projMatrix = cv::Mat::eye(3, 3, CV_64F);
+    projMatrix.at<double>(0, 0) = projW;  // rough fx
+    projMatrix.at<double>(1, 1) = projH;  // rough fy
+    projMatrix.at<double>(0, 2) = projW * 0.5; // cx
+    projMatrix.at<double>(1, 2) = projH * 0.5; // cy
+    cv::Mat projDistCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+
+    cv::Mat R, T, E, F;
+    cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 100, 1e-5);
+
+    int flags = cv::CALIB_FIX_INTRINSIC; // keep camera intrinsics fixed, solve projector
+    double rms = cv::stereoCalibrate(
+        objectPoints,
+        cameraImagePoints, projectorImagePoints,
+        cameraData.cameraMatrix, cameraData.cameraDistCoeffs,
+        projMatrix, projDistCoeffs,
+        cv::Size(projW, projH),
+        R, T, E, F,
+        flags,
+        criteria
+    );
+
+    ofLogNotice("ProjectorCalibrator") << "Stereo calibration RMS: " << rms;
+
+    // Store in CalibrationData
+    // Note: stereoCalibrate returns R, T from camera to projector (or projector to camera?)
+    // OpenCV convention: R, T transform points from camera 1 (camera) to camera 2 (projector)
+    // So projector_point = R * camera_point + T
+
+    // Save results
+    cameraData.projectorMatrix = projMatrix.clone();
+    cameraData.projectorDistCoeffs = projDistCoeffs.clone();
+    cameraData.projectorImageSize = cv::Size(projW, projH);
+    cameraData.isProjectorCalibrated = true;
+    cameraData.R = R.clone();
+    cameraData.T = T.clone();
+    cameraData.isStereoCalibrated = true;
+    cameraData.rectify();
+
+    ofLogNotice("ProjectorCalibrator") << "Calibration complete. Results written to passed CalibrationData.";
+
+    calibrated = true;
+    return true;
 }
 
 void ProjectorCalibrator::save(const std::string& path, CalibrationData& data) {
     if (!calibrated) return;
-    // data.projectorMatrix = ...;
-    // data.isProjectorCalibrated = true;
     data.save(path);
     ofLogNotice("ProjectorCalibrator") << "Saved to " << path;
 }
@@ -162,22 +274,23 @@ cv::Mat ProjectorCalibrator::grayCodePattern(int axis, int bit, bool inverse) {
     return pat;
 }
 
-void ProjectorCalibrator::decodeCorrespondences() {
-    if (capturedFrames.empty() || capturedFrames[0].empty()) return;
+void ProjectorCalibrator::decodeCurrentSequence(CalibPose& pose) {
+    if (pose.frames.empty() || pose.frames[0].empty()) return;
 
-    int camW = capturedFrames[0].cols;
-    int camH = capturedFrames[0].rows;
+    int camW = pose.frames[0].cols;
+    int camH = pose.frames[0].rows;
     int bits = grayCodeBits;
     int numStripes = 1 << bits;
 
-    decodedCameraCoords = cv::Mat(camH, camW, CV_32F, cv::Scalar(-1.0f));
-    decodedCameraCoordsY = cv::Mat(camH, camW, CV_32F, cv::Scalar(-1.0f));
+    pose.decodedProjX = cv::Mat(camH, camW, CV_32F, cv::Scalar(-1.0f));
+    pose.decodedProjY = cv::Mat(camH, camW, CV_32F, cv::Scalar(-1.0f));
+    pose.confidence = cv::Mat(camH, camW, CV_32F, cv::Scalar(0.0f));
 
     // Last two frames are black / white
     int idxBlack = (int)projectedPatterns.size() - 2;
     int idxWhite = (int)projectedPatterns.size() - 1;
-    const cv::Mat& black = capturedFrames[idxBlack];
-    const cv::Mat& white = capturedFrames[idxWhite];
+    const cv::Mat& black = pose.frames[idxBlack];
+    const cv::Mat& white = pose.frames[idxWhite];
 
     const float minContrast = 15.0f;
 
@@ -194,8 +307,8 @@ void ProjectorCalibrator::decodeCorrespondences() {
             for (int b = 0; b < bits; ++b) {
                 int idxXn = b * 2;
                 int idxXi = b * 2 + 1;
-                float nx = capturedFrames[idxXn].at<uchar>(cy, cx);
-                float ix = capturedFrames[idxXi].at<uchar>(cy, cx);
+                float nx = pose.frames[idxXn].at<uchar>(cy, cx);
+                float ix = pose.frames[idxXi].at<uchar>(cy, cx);
                 float diffX = nx - ix;
                 if (std::abs(diffX) < minContrast * 0.3f) { valid = false; break; }
                 int bitX = diffX > 0 ? 1 : 0;
@@ -203,8 +316,8 @@ void ProjectorCalibrator::decodeCorrespondences() {
 
                 int idxYn = (bits * 2) + b * 2;
                 int idxYi = (bits * 2) + b * 2 + 1;
-                float ny = capturedFrames[idxYn].at<uchar>(cy, cx);
-                float iy = capturedFrames[idxYi].at<uchar>(cy, cx);
+                float ny = pose.frames[idxYn].at<uchar>(cy, cx);
+                float iy = pose.frames[idxYi].at<uchar>(cy, cx);
                 float diffY = ny - iy;
                 if (std::abs(diffY) < minContrast * 0.3f) { valid = false; break; }
                 int bitY = diffY > 0 ? 1 : 0;
@@ -221,20 +334,32 @@ void ProjectorCalibrator::decodeCorrespondences() {
             float projX = (stripeX + 0.5f) * ((float)projW / numStripes);
             float projY = (stripeY + 0.5f) * ((float)projH / numStripes);
 
-            decodedCameraCoords.at<float>(cy, cx) = projX;
-            decodedCameraCoordsY.at<float>(cy, cx) = projY;
+            pose.decodedProjX.at<float>(cy, cx) = projX;
+            pose.decodedProjY.at<float>(cy, cx) = projY;
+            pose.confidence.at<float>(cy, cx) = contrast / 255.0f;
         }
     }
 
     int validPixels = 0;
     for (int y = 0; y < camH; ++y) {
         for (int x = 0; x < camW; ++x) {
-            if (decodedCameraCoords.at<float>(y, x) >= 0.0f) validPixels++;
+            if (pose.decodedProjX.at<float>(y, x) >= 0.0f) validPixels++;
         }
     }
-    ofLogNotice("ProjectorCalibrator") << "Decoded " << validPixels << " correspondences";
+    ofLogNotice("ProjectorCalibrator") << "Decoded pose: " << validPixels << " correspondences";
+}
+
+bool ProjectorCalibrator::extractCheckerboardFromWhiteFrame(const cv::Mat& whiteFrame,
+                                                            std::vector<cv::Point2f>& corners) {
+    bool found = cv::findChessboardCorners(whiteFrame, boardSize, corners,
+        cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK);
+    if (!found) return false;
+
+    cv::cornerSubPix(whiteFrame, corners, cv::Size(11, 11), cv::Size(-1, -1),
+        cv::TermCriteria(cv::TermCriteria::EPS | cv::TermCriteria::MAX_ITER, 30, 0.001));
+    return true;
 }
 
 void ProjectorCalibrator::onCalibrate() {
-    ofLogNotice("ProjectorCalibrator") << "onCalibrate called – invoke calibrate(cameraData) from ofApp with valid CalibrationData";
+    ofLogNotice("ProjectorCalibrator") << "onCalibrate triggered — call calibrate(cameraData) from ofApp";
 }

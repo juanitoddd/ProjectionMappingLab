@@ -29,7 +29,6 @@ void MeshViewer::drawProjector(ofCamera& projectorCam) {
     ofPushStyle();
     ofSetColor(meshColor);
 
-    projectorCam.begin();
     ofScale(meshScale, meshScale, meshScale);
 
     if (wireframe) {
@@ -43,7 +42,6 @@ void MeshViewer::drawProjector(ofCamera& projectorCam) {
         light.disable();
         ofDisableLighting();
     }
-    projectorCam.end();
 
     ofPopStyle();
 }

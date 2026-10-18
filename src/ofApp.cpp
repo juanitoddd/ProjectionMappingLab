@@ -128,9 +128,11 @@ void ofApp::draw() {
         break;
     case STATE_MESH_VIEW:
         meshViewer.drawGui(guiX, guiY);
-        // Draw mesh preview in main window
+        // Draw mesh preview in main window from projector POV
         ofEnableDepthTest();
+        projectorCam.begin();
         meshViewer.drawProjector(projectorCam);
+        projectorCam.end();
         ofDisableDepthTest();
         break;
     case STATE_MAP:

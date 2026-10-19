@@ -23,11 +23,15 @@ void ProjectorCalibrator::setup(int projectorWidth, int projectorHeight) {
     gui.add(minBrightnessSlider.setup("Min Brightness", 10, 0, 255));
     gui.add(maxBrightnessSlider.setup("Max Brightness", 245, 0, 255));
     gui.add(btnStart.setup("Start New Pose"));
+    gui.add(btnPause.setup("Pause"));
+    gui.add(btnResume.setup("Resume"));
     gui.add(btnAddPose.setup("Finish Pose (Enter)"));
     gui.add(btnCalibrate.setup("Calibrate"));
     gui.add(btnClear.setup("Clear All"));
 
     btnStart.addListener(this, &ProjectorCalibrator::startSequence);
+    btnPause.addListener(this, &ProjectorCalibrator::onPauseSequence);
+    btnResume.addListener(this, &ProjectorCalibrator::onResumeSequence);
     btnAddPose.addListener(this, &ProjectorCalibrator::finishPose);
     btnCalibrate.addListener(this, &ProjectorCalibrator::onCalibrate);
     btnClear.addListener(this, &ProjectorCalibrator::clearPoses);
@@ -65,15 +69,20 @@ void ProjectorCalibrator::update(ofPixels& cameraPixels) {
 }
 
 void ProjectorCalibrator::drawGui(int x, int y) {
+    // Dynamically update interval from slider so changes apply to next frame boundary
+    if (currentPatternIndex >= 0) {
+        captureInterval = captureIntervalSlider / 1000.0f;
+    }
+
     gui.setPosition(x, y);
     gui.draw();
     ofDrawBitmapStringHighlight("Poses: " + ofToString(getPoseCount()), x, y + gui.getHeight() + 20);
     ofDrawBitmapStringHighlight("Current frames: " + ofToString(getCapturedFrameCount()) + " / " + ofToString(projectedPatterns.size()), x, y + gui.getHeight() + 40);
     if (isPaused) {
-        ofDrawBitmapStringHighlight("Status: PAUSED — frame validation failed", x, y + gui.getHeight() + 60, ofColor(255, 0, 0), ofColor(255));
+        ofDrawBitmapStringHighlight("Status: PAUSED", x, y + gui.getHeight() + 60, ofColor(255, 200, 0), ofColor(0));
     } else if (currentPatternIndex >= 0) {
         float cd = getCountdown();
-        ofDrawBitmapStringHighlight("Capture in: " + ofToString(cd, 2) + " s", x, y + gui.getHeight() + 60);
+        ofDrawBitmapStringHighlight("Capturing in " + ofToString(cd, 1) + " s", x, y + gui.getHeight() + 60);
     }
     ofDrawBitmapStringHighlight("Status: " + std::string(calibrated ? "CALIBRATED" : "NOT CALIBRATED"), x, y + gui.getHeight() + 80);
 }
@@ -177,12 +186,23 @@ void ProjectorCalibrator::abortSequence() {
     ofLogNotice("ProjectorCalibrator") << "Sequence aborted";
 }
 
-void ProjectorCalibrator::resumeSequence() {
+void ProjectorCalibrator::onPauseSequence() {
+    if (currentPatternIndex < 0 || isPaused) return;
+    isPaused = true;
+    ofLogNotice("ProjectorCalibrator") << "Sequence paused by user at pattern " << currentPatternIndex;
+}
+
+void ProjectorCalibrator::onResumeSequence() {
     if (!isPaused) return;
     isPaused = false;
     currentRetry = 0;
     lastCaptureTime = ofGetElapsedTimef();
     ofLogNotice("ProjectorCalibrator") << "Sequence resumed at pattern " << currentPatternIndex;
+}
+
+void ProjectorCalibrator::resumeSequence() {
+    // Public resume API (used by ofApp key handler)
+    onResumeSequence();
 }
 
 bool ProjectorCalibrator::shouldCapture() const {

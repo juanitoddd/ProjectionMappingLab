@@ -68,11 +68,13 @@ private:
     ofxFloatSlider captureIntervalSlider;
     ofxIntSlider minBrightnessSlider;
     ofxIntSlider maxBrightnessSlider;
-    ofxButton btnStart, btnCapture, btnReset;
+    ofxButton btnStart, btnPause, btnResume, btnCapture, btnReset;
 
     float lastCaptureTime = 0.0f;
     float captureInterval = 0.5f;
 
+    void onPauseScan();
+    void onResumeScan();
     void generatePatterns();
     cv::Mat grayCodePattern(int axis, int bit, bool inverse);
     cv::Mat phasePattern(int axis, int step);

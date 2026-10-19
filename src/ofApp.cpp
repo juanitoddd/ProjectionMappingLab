@@ -14,8 +14,17 @@ void ofApp::setup() {
     camW = grabber.getWidth();
     camH = grabber.getHeight();
 
-    // Setup projector FBO
-    projectorFbo.allocate(projW, projH, GL_RGBA);
+    // Setup projector FBO with stencil buffer for mask regions
+    ofFbo::Settings fboSettings;
+    fboSettings.width = projW;
+    fboSettings.height = projH;
+    fboSettings.internalformat = GL_RGBA8;
+    fboSettings.numSamples = 0;
+    fboSettings.useDepth = true;
+    fboSettings.useStencil = true;
+    fboSettings.depthStencilAsTexture = false;
+    fboSettings.textureTarget = GL_TEXTURE_2D;
+    projectorFbo.allocate(fboSettings);
 
     // Setup managers
     cameraCalib.setup(camW, camH);
@@ -23,6 +32,7 @@ void ofApp::setup() {
     scanner.setup(projW, projH);
     meshViewer.setup();
     mappingEditor.setup(projW, projH);
+    verifier.setup(9, 6, 2.5f);
 
     // Load existing calibration
     if (calibrationData.load(calibPath)) {
@@ -63,6 +73,9 @@ void ofApp::update() {
         case STATE_SCAN:
             scanner.update(px);
             break;
+        case STATE_VERIFY:
+            verifier.update(px);
+            break;
         default:
             break;
         }
@@ -96,24 +109,61 @@ void ofApp::update() {
 
     // Update projector camera from calibration
     if (calibrationData.isComplete()) {
-        // Projector extrinsics define projector pose in camera space
-        // Build a glm camera that looks through the projector
-        glm::vec3 t(calibrationData.T.at<double>(0, 0),
-                    calibrationData.T.at<double>(1, 0),
-                    calibrationData.T.at<double>(2, 0));
-        cv::Mat R_t = calibrationData.R.t();
-        glm::mat3 R;
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j)
-                R[j][i] = (float)R_t.at<double>(i, j);
+        // ===================================================================
+        // OpenCV ↔ openFrameworks coordinate convention conversion
+        // ===================================================================
+        // OpenCV stereoCalibrate returns R, T that transform points FROM the
+        // camera coordinate system TO the projector coordinate system:
+        //     X_proj = R * X_cam + T
+        //
+        // OpenCV camera coords:  X right, Y DOWN, Z forward (into scene)
+        // OF/GL world coords:    X right, Y UP,    Z forward (into scene)
+        //
+        // Conversion rule: (x, y, z)_cv → (x, -y, z)_of  (flip Y)
+        //
+        // Projector position in camera coords:  -R^T * T
+        // Projector forward (+Z) in camera:      R^T * (0,0,1)  = third row of R
+        // Projector up (-Y in cv = up in image):  R^T * (0,-1,0) = -second row of R
+        //
+        // After Y-flip for OF world:
+        //   eye    = (-R^T * T).x,  -(-R^T * T).y,  (-R^T * T).z
+        //   forward = R[2,0],       -R[2,1],        R[2,2]
+        //   up      = -R[1,0],      +R[1,1],        -R[1,2]
+        // ===================================================================
 
-        glm::vec3 eye = t;
-        glm::vec3 center = eye + R * glm::vec3(0, 0, 1);
-        glm::vec3 up = R * glm::vec3(0, -1, 0);
+        cv::Mat Rcv = calibrationData.R;
+        cv::Mat Rcv_T = Rcv.t();
+        cv::Mat pos_cv = -Rcv_T * calibrationData.T; // 3x1
+
+        glm::vec3 eye(
+            pos_cv.at<double>(0, 0),
+            -pos_cv.at<double>(1, 0),   // flip Y
+            pos_cv.at<double>(2, 0)
+        );
+
+        glm::vec3 forward(
+            Rcv.at<double>(2, 0),
+            -Rcv.at<double>(2, 1),      // flip Y
+            Rcv.at<double>(2, 2)
+        );
+
+        glm::vec3 up(
+            -Rcv.at<double>(1, 0),
+            +Rcv.at<double>(1, 1),      // -(-Y) = +Y
+            -Rcv.at<double>(1, 2)
+        );
+
+        glm::vec3 center = eye + forward;
 
         projectorCam.setPosition(eye);
         projectorCam.lookAt(center, up);
-        projectorCam.setFov(2.0f * atan2(projH * 0.5f, calibrationData.projectorMatrix.at<double>(1, 1)) * RAD_TO_DEG);
+
+        double fy = calibrationData.projectorMatrix.at<double>(1, 1);
+        float fov = 2.0f * atan2(projH * 0.5f, fy) * RAD_TO_DEG;
+        projectorCam.setFov(fov);
+
+        ofLogNotice("ofApp") << "Projector pose: eye=(" << eye.x << ", " << eye.y << ", " << eye.z
+            << ") fov=" << fov << "° up=(" << up.x << ", " << up.y << ", " << up.z << ")";
     }
 }
 
@@ -150,13 +200,34 @@ void ofApp::draw() {
         meshViewer.drawProjector(projectorCam);
         projectorCam.end();
         ofDisableDepthTest();
+        // Show last verification result as overlay
+        if (verifier.hasResult()) {
+            const auto& res = verifier.getResult();
+            ofColor statusColor = res.passed ? ofColor(0, 255, 0) : ofColor(255, 200, 0);
+            std::string statusText = res.passed ? "PASS" : "CHECK RIG";
+            ofDrawBitmapStringHighlight("Verify: RMS=" + ofToString(res.rmsError, 2) + "px [" + statusText + "]",
+                20, previewH - 20, statusColor, ofColor(0));
+        }
+        break;
+    case STATE_VERIFY:
+        verifier.drawPreview(0, 0, previewW, previewH);
+        verifier.drawGui(guiX, guiY);
         break;
     case STATE_MAP:
     case STATE_PERFORM:
         mappingEditor.drawGui(guiX, guiY);
-        // Show projector FBO preview
+        // Render projector output with camera, then draw as preview
+        if (calibrationData.isComplete()) {
+            projectorFbo.begin();
+            projectorCam.begin();
+            mappingEditor.drawProjector(projectorFbo, meshViewer.getMesh(), projectorCam.getPosition());
+            projectorCam.end();
+            projectorFbo.end();
+        }
         projectorFbo.draw(0, 0, previewW, previewH);
-        mappingEditor.drawMaskOutlines(); // only if we track window
+        mappingEditor.setPreviewBounds(20, 20, previewW, previewH);
+        mappingEditor.drawPreviewOverlay(meshViewer.getMesh());
+        mappingEditor.drawMaskOutlines();
         break;
     }
     ofPopMatrix();
@@ -193,9 +264,20 @@ void ofApp::drawProjector(ofEventArgs& args) {
             projectorFbo.draw(0, 0);
         }
         break;
+    case STATE_VERIFY:
+        if (calibrationData.isComplete()) {
+            projectorFbo.begin();
+            ofClear(0, 0, 0, 0);
+            projectorCam.begin();
+            meshViewer.drawProjector(projectorCam);
+            projectorCam.end();
+            projectorFbo.end();
+            projectorFbo.draw(0, 0);
+        }
+        break;
     case STATE_MAP:
     case STATE_PERFORM:
-        mappingEditor.drawProjector(projectorFbo, meshViewer.getMesh());
+        // Projector window just blits the pre-rendered FBO
         projectorFbo.draw(0, 0);
         break;
     default:
@@ -222,6 +304,12 @@ void ofApp::keyPressed(int key) {
         if (key == OF_KEY_ESC) scanner.abortScan();
         if (key == ' ' && scanner.isScanPaused()) scanner.resumeScan();
         break;
+    case STATE_VERIFY:
+        if (key == ' ') verifier.captureVerifyPose(calibrationData);
+        if (key == 'c') verifier.computeReprojectionError(calibrationData);
+        if (key == 'a') verifier.applyFineTuningOffsets(calibrationData);
+        if (key == 's') calibrationData.save(calibPath);
+        break;
     case STATE_MAP:
         mappingEditor.keyPressed(key);
         break;
@@ -240,23 +328,38 @@ void ofApp::mouseMoved(int x, int y) {
 }
 
 //--------------------------------------------------------------
+// Mouse coordinate correction for STATE_MAP preview area.
+// The preview is at window offset (20,20) with size previewW x previewH.
+//--------------------------------------------------------------
+static inline void toPreviewCoords(int rawX, int rawY, int& outX, int& outY) {
+    outX = rawX - 20;
+    outY = rawY - 20;
+    // Clamp negative values so the hit test still works at edges
+    if (outX < 0) outX = 0;
+    if (outY < 0) outY = 0;
+}
+
 void ofApp::mouseDragged(int x, int y, int button) {
     if (state == STATE_MAP) {
-        mappingEditor.mouseDragged(x, y);
+        int px, py;
+        toPreviewCoords(x, y, px, py);
+        mappingEditor.mouseDragged(px, py);
     }
 }
 
-//--------------------------------------------------------------
 void ofApp::mousePressed(int x, int y, int button) {
     if (state == STATE_MAP) {
-        mappingEditor.mousePressed(x, y);
+        int px, py;
+        toPreviewCoords(x, y, px, py);
+        mappingEditor.mousePressed(px, py);
     }
 }
 
-//--------------------------------------------------------------
 void ofApp::mouseReleased(int x, int y, int button) {
     if (state == STATE_MAP) {
-        mappingEditor.mouseReleased(x, y);
+        int px, py;
+        toPreviewCoords(x, y, px, py);
+        mappingEditor.mouseReleased(px, py);
     }
 }
 
@@ -274,6 +377,7 @@ bool ofApp::canAdvance() const {
     case STATE_PROJECTOR_CALIB: return projectorCalib.isCalibrated();
     case STATE_SCAN: return scanner.isComplete();
     case STATE_MESH_VIEW: return meshViewer.hasMesh();
+    case STATE_VERIFY: return true;
     case STATE_MAP: return true;
     case STATE_PERFORM: return true;
     }
@@ -300,7 +404,11 @@ void ofApp::nextState() {
         state = STATE_MESH_VIEW;
         break;
     case STATE_MESH_VIEW:
+        state = STATE_VERIFY;
+        break;
+    case STATE_VERIFY:
         state = STATE_MAP;
+        mappingEditor.computeTriangleMembership(meshViewer.getMesh());
         break;
     case STATE_MAP:
         state = STATE_PERFORM;
@@ -317,13 +425,14 @@ void ofApp::prevState() {
     case STATE_PROJECTOR_CALIB: state = STATE_CAMERA_CALIB; break;
     case STATE_SCAN: state = STATE_PROJECTOR_CALIB; break;
     case STATE_MESH_VIEW: state = STATE_SCAN; break;
-    case STATE_MAP: state = STATE_MESH_VIEW; break;
+    case STATE_VERIFY: state = STATE_MESH_VIEW; break;
+    case STATE_MAP: state = STATE_VERIFY; break;
     case STATE_PERFORM: state = STATE_MAP; break;
     }
     updateState();
 }
 
 void ofApp::updateState() {
-    const char* names[] = {"CAMERA_CALIB", "PROJECTOR_CALIB", "SCAN", "MESH_VIEW", "MAP", "PERFORM"};
+    const char* names[] = {"CAMERA_CALIB", "PROJECTOR_CALIB", "SCAN", "MESH_VIEW", "VERIFY", "MAP", "PERFORM"};
     stateLabel = names[state];
 }

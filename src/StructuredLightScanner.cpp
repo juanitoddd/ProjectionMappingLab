@@ -23,10 +23,14 @@ void StructuredLightScanner::setup(int projectorWidth, int projectorHeight) {
     gui.add(minBrightnessSlider.setup("Min Brightness", 10, 0, 255));
     gui.add(maxBrightnessSlider.setup("Max Brightness", 245, 0, 255));
     gui.add(btnStart.setup("Start Scan"));
+    gui.add(btnPause.setup("Pause"));
+    gui.add(btnResume.setup("Resume"));
     gui.add(btnCapture.setup("Capture Frame (Space) [Debug]"));
     gui.add(btnReset.setup("Reset"));
 
     btnStart.addListener(this, &StructuredLightScanner::startScan);
+    btnPause.addListener(this, &StructuredLightScanner::onPauseScan);
+    btnResume.addListener(this, &StructuredLightScanner::onResumeScan);
     btnCapture.addListener(this, &StructuredLightScanner::captureFrame);
     btnReset.addListener(this, &StructuredLightScanner::reset);
 }
@@ -61,17 +65,24 @@ void StructuredLightScanner::update(ofPixels& cameraPixels) {
 }
 
 void StructuredLightScanner::drawGui(int x, int y) {
+    // Dynamically update interval from slider so changes apply to next frame boundary
+    if (scanning) {
+        captureInterval = captureIntervalSlider / 1000.0f;
+    }
+
     gui.setPosition(x, y);
     gui.draw();
     ofDrawBitmapStringHighlight("Pattern: " + ofToString(currentPattern) + " / " + ofToString(totalPatterns), x, y + gui.getHeight() + 20);
     if (isPaused) {
-        ofDrawBitmapStringHighlight("Status: PAUSED — frame validation failed", x, y + gui.getHeight() + 40, ofColor(255, 0, 0), ofColor(255));
+        ofDrawBitmapStringHighlight("Status: PAUSED", x, y + gui.getHeight() + 40, ofColor(255, 200, 0), ofColor(0));
     } else {
         ofDrawBitmapStringHighlight("Status: " + std::string(scanComplete ? "COMPLETE" : (scanning ? "SCANNING" : "IDLE")), x, y + gui.getHeight() + 40);
     }
     if (scanning && !isPaused) {
         float cd = getCountdown();
-        ofDrawBitmapStringHighlight("Capture in: " + ofToString(cd, 2) + " s", x, y + gui.getHeight() + 60);
+        ofDrawBitmapStringHighlight("Capturing in " + ofToString(cd, 1) + " s", x, y + gui.getHeight() + 60);
+    } else if (scanning && isPaused) {
+        ofDrawBitmapStringHighlight("Paused at pattern " + ofToString(currentPattern), x, y + gui.getHeight() + 60, ofColor(255, 200, 0), ofColor(0));
     }
     ofDrawBitmapStringHighlight("Mesh vertices: " + ofToString(mesh.getNumVertices()), x, y + gui.getHeight() + 80);
 }
@@ -186,12 +197,23 @@ void StructuredLightScanner::abortScan() {
     ofLogNotice("StructuredLightScanner") << "Scan aborted";
 }
 
-void StructuredLightScanner::resumeScan() {
+void StructuredLightScanner::onPauseScan() {
+    if (!scanning || isPaused) return;
+    isPaused = true;
+    ofLogNotice("StructuredLightScanner") << "Scan paused by user at pattern " << currentPattern;
+}
+
+void StructuredLightScanner::onResumeScan() {
     if (!isPaused) return;
     isPaused = false;
     currentRetry = 0;
     lastCaptureTime = ofGetElapsedTimef();
     ofLogNotice("StructuredLightScanner") << "Scan resumed at pattern " << currentPattern;
+}
+
+void StructuredLightScanner::resumeScan() {
+    // Public resume API (used by ofApp key handler)
+    onResumeScan();
 }
 
 bool StructuredLightScanner::shouldCapture() const {

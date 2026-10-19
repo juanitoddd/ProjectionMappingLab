@@ -9,12 +9,14 @@
 #include "StructuredLightScanner.h"
 #include "MeshViewer.h"
 #include "MappingEditor.h"
+#include "CalibrationVerifier.h"
 
 enum AppState {
     STATE_CAMERA_CALIB,
     STATE_PROJECTOR_CALIB,
     STATE_SCAN,
     STATE_MESH_VIEW,
+    STATE_VERIFY,
     STATE_MAP,
     STATE_PERFORM
 };
@@ -54,6 +56,7 @@ private:
     StructuredLightScanner scanner;
     MeshViewer meshViewer;
     MappingEditor mappingEditor;
+    CalibrationVerifier verifier;
     CalibrationData calibrationData;
 
     // Projector output

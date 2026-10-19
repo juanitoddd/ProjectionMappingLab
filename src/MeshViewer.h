@@ -10,6 +10,7 @@ public:
     void update();
     void drawGui(int x, int y);
     void drawProjector(ofCamera& projectorCam);
+    void drawDiagnosticGrid(ofCamera& projectorCam);
     void loadMesh(ofVboMesh& m);
     ofVboMesh& getMesh() { return mesh; }
     bool hasMesh() const { return hasMesh_; }
@@ -24,5 +25,9 @@ private:
     ofxFloatSlider meshScale;
     ofxToggle wireframe;
     ofxToggle autoRotate;
+    ofxToggle showDiagnosticGrid;
+    ofxFloatSlider diagnosticGridDistance;
     ofParameter<ofColor> meshColor;
+
+    ofVboMesh diagnosticGrid;
 };
